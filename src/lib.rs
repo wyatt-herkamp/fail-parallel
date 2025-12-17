@@ -208,11 +208,11 @@ use std::collections::HashMap;
 use std::env::VarError;
 use std::fmt::Debug;
 use std::str::FromStr;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 use std::{env, mem, thread};
-use std::sync::atomic::Ordering::Relaxed;
 
 #[derive(Clone)]
 struct SyncCallback(Arc<dyn Fn() + Send + Sync>);
@@ -318,7 +318,7 @@ impl Action {
                 return None;
             }
         }
-        if self.freq < 1f32 && !rand::thread_rng().gen_bool(f64::from(self.freq)) {
+        if self.freq < 1f32 && !rand::rng().random_bool(f64::from(self.freq)) {
             return None;
         }
         if let Some(ref ref_cnt) = self.count {
@@ -416,7 +416,7 @@ impl FromStr for Action {
 struct FailPoint {
     actions: Mutex<ConfiguredActions>,
     sync_notifier: Condvar,
-    async_notifier: AsyncNotifier
+    async_notifier: AsyncNotifier,
 }
 
 #[derive(Debug)]
@@ -429,7 +429,7 @@ struct AsyncNotifier {
 struct ConfiguredActions {
     seq: u64,
     actions_str: String,
-    actions: Vec<Action>
+    actions: Vec<Action>,
 }
 
 impl ConfiguredActions {
@@ -437,7 +437,7 @@ impl ConfiguredActions {
         ConfiguredActions {
             seq,
             actions_str: String::new(),
-            actions: vec![]
+            actions: vec![],
         }
     }
 }
@@ -473,7 +473,7 @@ impl FailPoint {
         *actions_guard = ConfiguredActions {
             seq: next_seq,
             actions_str: actions_str.to_string(),
-            actions
+            actions,
         };
         self.sync_notifier.notify_all();
         self.async_notifier.tx.send(next_seq).unwrap();
@@ -490,12 +490,7 @@ impl FailPoint {
         }
     }
 
-    fn eval_task(
-        &self,
-        action_seq: u64,
-        name: &str,
-        task: Task
-    ) -> Option<Option<String>> {
+    fn eval_task(&self, action_seq: u64, name: &str, task: Task) -> Option<Option<String>> {
         match task {
             Task::Off => {}
             Task::Return(s) => return Some(s),
@@ -509,11 +504,13 @@ impl FailPoint {
                 None => log::info!("failpoint {} executed.", name),
             },
             Task::Pause => {
-                let _unused = self.sync_notifier.wait_while(
-                    self.actions.lock().unwrap(),
-                    |guard| { (*guard).seq == action_seq }
-                ).unwrap();
-            },
+                let _unused = self
+                    .sync_notifier
+                    .wait_while(self.actions.lock().unwrap(), |guard| {
+                        (*guard).seq == action_seq
+                    })
+                    .unwrap();
+            }
             Task::Yield => thread::yield_now(),
             Task::Delay(t) => {
                 let timer = Instant::now();
@@ -538,7 +535,7 @@ impl FailPoint {
         }
     }
 
-    fn next_task(&self) -> (Option<Task>, u64){
+    fn next_task(&self) -> (Option<Task>, u64) {
         let guard = self.actions.lock().unwrap();
         let task = guard.actions.iter().filter_map(Action::get_task).next();
         (task, (*guard).seq)
@@ -548,13 +545,12 @@ impl FailPoint {
         &self,
         action_seq: u64,
         name: &str,
-        task: Task
+        task: Task,
     ) -> Option<Option<String>> {
         match task {
             Task::Off => {}
             Task::Return(s) => return Some(s),
-            Task::Sleep(t) =>
-                tokio::time::sleep(Duration::from_millis(t)).await,
+            Task::Sleep(t) => tokio::time::sleep(Duration::from_millis(t)).await,
             Task::Panic(msg) => match msg {
                 Some(ref msg) => panic!("{}", msg),
                 None => panic!("failpoint {} panic", name),
@@ -566,7 +562,7 @@ impl FailPoint {
             Task::Pause => {
                 let mut rx = self.async_notifier.rx.clone();
                 rx.wait_for(|val| *val != action_seq).await.unwrap();
-            },
+            }
             Task::Yield => tokio::task::yield_now().await,
             Task::Delay(t) => {
                 let timer = Instant::now();
@@ -708,10 +704,7 @@ pub fn list(fp_registry: Arc<FailPointRegistry>) -> Vec<(String, String)> {
         .collect()
 }
 
-fn find_fail_point(
-    fp_registry: Arc<FailPointRegistry>,
-    name: &str,
-) -> Option<Arc<FailPoint>> {
+fn find_fail_point(fp_registry: Arc<FailPointRegistry>, name: &str) -> Option<Arc<FailPoint>> {
     let registry = fp_registry.registry.read().unwrap();
     registry.get(name).map(|p| p.clone())
 }
@@ -862,7 +855,8 @@ impl FailGuard {
     }
 }
 
-fn set(registry: &mut HashMap<String, Arc<FailPoint>>,
+fn set(
+    registry: &mut HashMap<String, Arc<FailPoint>>,
     name: String,
     actions: &str,
 ) -> Result<(), String> {
@@ -1031,7 +1025,8 @@ macro_rules! fail_point_async {
     ($registry:expr, $name:expr) => {{
         $crate::eval_async($registry, $name, |_| {
             panic!("Return is not supported for the fail point \"{}\"", $name);
-        }).await;
+        })
+        .await;
     }};
     ($registry:expr, $name:expr, $e:expr) => {{
         if let Some(res) = $crate::eval_async($registry, $name, $e).await {
@@ -1044,7 +1039,6 @@ macro_rules! fail_point_async {
         }
     }};
 }
-
 
 /// Define a fail point (disabled, see `failpoints` feature).
 #[macro_export]
@@ -1159,19 +1153,20 @@ mod tests {
         rx.recv().await.unwrap();
     }
 
-    #[tokio::test(flavor="current_thread", start_paused=true)]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn test_async_sleep() {
         let value = Arc::new(AtomicU64::new(0));
 
         fn spawn_sleep_task(
             sleep_duration_millis: u64,
             value: Arc<AtomicU64>,
-            value_to_set: u64
+            value_to_set: u64,
         ) -> tokio::task::JoinHandle<()> {
             let point = Arc::new(FailPoint::new());
-            point.set_actions("", vec![Action::new(
-                Task::Sleep(sleep_duration_millis), 1.0, None)
-            ]);
+            point.set_actions(
+                "",
+                vec![Action::new(Task::Sleep(sleep_duration_millis), 1.0, None)],
+            );
             let p = point.clone();
             tokio::spawn(async move {
                 assert_eq!(p.eval_async("test_fail_point_sleep").await, None);

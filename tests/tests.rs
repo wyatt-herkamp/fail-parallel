@@ -222,9 +222,15 @@ fn test_condition() {
 #[test]
 fn test_list() {
     let registry = Arc::new(FailPointRegistry::new());
-    assert!(!fail_parallel::list(registry.clone()).contains(&("list".to_string(), "off".to_string())));
+    assert!(
+        !fail_parallel::list(registry.clone()).contains(&("list".to_string(), "off".to_string()))
+    );
     fail_parallel::cfg(registry.clone(), "list", "off").unwrap();
-    assert!(fail_parallel::list(registry.clone()).contains(&("list".to_string(), "off".to_string())));
+    assert!(
+        fail_parallel::list(registry.clone()).contains(&("list".to_string(), "off".to_string()))
+    );
     fail_parallel::cfg(registry.clone(), "list", "return").unwrap();
-    assert!(fail_parallel::list(registry.clone()).contains(&("list".to_string(), "return".to_string())));
+    assert!(
+        fail_parallel::list(registry.clone()).contains(&("list".to_string(), "return".to_string()))
+    );
 }
